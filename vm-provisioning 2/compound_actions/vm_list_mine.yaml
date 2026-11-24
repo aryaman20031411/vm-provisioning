@@ -1,0 +1,86 @@
+# =====================================================================
+# Compound Action: vm_list_mine
+# Input args:  requester_email (string)  <- meta_info.user.email_addr
+# Called from: list_my_vms (Wait for Completion) and delete_my_vm, Activity 1
+#
+# Reads the Spacelift stack and returns the caller's VMs: running ones from
+# Terraform's vm_inventory output, plus any still being built (in the request
+# list but not yet in the inventory).
+# Change the stack ID and account in the two places marked CONFIG.
+# =====================================================================
+steps:
+  - action:
+      action_name: spacelift_get_token
+      output_key: token
+
+  - action:
+      action_name: spacelift_get_stack
+      output_key: stack
+      input_args:
+        jwt: data.token.data.apiKeyUser.jwt
+        stack_id: '"vm-provisioner"'              # CONFIG
+
+  - script:
+      output_key: mine
+      input_args:
+        requester_email: data.requester_email
+        config: data.stack.data.stack.config
+        outputs: data.stack.data.stack.outputs
+        stack_state: data.stack.data.stack.state
+      code: |
+        STACK_URL = "https://aryaman20031411.app.spacelift.io/stack/vm-provisioner"   # CONFIG
+        me = str(requester_email or "").lower()
+
+        requested = "none"
+        for c in (config or []):
+            if c.get("id") == "TF_VAR_vm_requests":
+                requested = str(c.get("value") or "none")
+        inv = ""
+        for o in (outputs or []):
+            if o.get("id") == "vm_inventory":
+                inv = str(o.get("value") or "")
+        if len(inv) >= 2 and inv[0] == '"' and inv[-1] == '"':
+            inv = inv[1:-1]
+
+        running = {}
+        for r in inv.split(";"):
+            f = r.split("|")
+            if len(f) >= 8:
+                running[f[0]] = f
+
+        vms = []
+        for r in requested.split(";"):
+            f = r.split("|")
+            if len(f) < 10 or f[9].lower() != me:
+                continue
+            rid = f[0]
+            if rid in running:
+                g = running[rid]
+                vms.append({"request_id": rid, "hostname": g[1], "ip_address": g[2], "instance_id": g[3],
+                            "environment": g[5], "instance_type": g[6], "os_image": g[7],
+                            "size": f[2] + " vCPU / " + f[3] + " GB", "lease_days": f[8], "status": "running"})
+            else:
+                vms.append({"request_id": rid, "hostname": f[7], "ip_address": "", "instance_id": "",
+                            "environment": f[1], "instance_type": f[10] if len(f) > 10 else "", "os_image": f[5],
+                            "size": f[2] + " vCPU / " + f[3] + " GB", "lease_days": f[8], "status": "provisioning"})
+
+        if len(vms) == 0:
+            summary = "You have no VMs right now. Say \"I need a VM\" to request one."
+        else:
+            lines = ["You have " + str(len(vms)) + " VM" + ("" if len(vms) == 1 else "s") + ":"]
+            for v in vms:
+                line = "- " + v["hostname"] + " (" + v["environment"] + ", " + v["os_image"] + ", " + (v["instance_type"] + ", " if v["instance_type"] else "") + v["size"] + ") - " + v["status"]
+                if v["ip_address"]:
+                    line = line + ", IP " + v["ip_address"]
+                lines.append(line)
+            lines.append("Spacelift stack: " + STACK_URL)
+            summary = "\n".join(lines)
+
+        {"vms": vms, "count": len(vms), "summary_text": summary, "hostnames": [v["hostname"] for v in vms]}
+
+  - return:
+      output_mapper:
+        vms: data.mine.vms
+        count: data.mine.count
+        hostnames: data.mine.hostnames
+        summary_text: data.mine.summary_text
