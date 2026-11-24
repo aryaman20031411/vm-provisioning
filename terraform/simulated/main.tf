@@ -2,7 +2,7 @@
 #
 # The stack holds ALL current VM requests in one variable, TF_VAR_vm_requests:
 #   rows separated by ";", fields separated by "|", in this order:
-#   request_id|environment|vcpu|memory_gb|disk_gb|os_image|owner|hostname|lease_days|requester_email
+#   request_id|environment|vcpu|memory_gb|disk_gb|os_image|owner|hostname|lease_days|requester_email|instance_type
 # Moveworks adds a row to provision and removes a row to delete; Terraform does the rest.
 # "none" means no VMs.
 
@@ -34,6 +34,7 @@ locals {
       hostname        = f[7]
       lease_days      = tonumber(f[8])
       requester_email = f[9]
+      instance_type   = coalesce(try(f[10], ""), "sim-${f[2]}cpu-${f[3]}gb")
     }
   }
 }
@@ -88,7 +89,7 @@ output "vm_inventory" {
       "vm-${random_id.instance[k].hex}",
       v.requester_email,
       v.environment,
-      "sim-${v.vcpu}cpu-${v.memory_gb}gb",
+      v.instance_type,
       v.os_image,
     ])
   ])

@@ -1,12 +1,12 @@
-# Real VMs on AWS EC2, the simplest possible setup:
-#   - the stack holds ALL current VM requests in TF_VAR_vm_requests (same format as ../simulated):
-#     request_id|environment|vcpu|memory_gb|disk_gb|os_image|owner|hostname|lease_days|requester_email
-#     rows separated by ";". "none" means no VMs. Moveworks adds/removes rows.
-#   - uses the account's DEFAULT VPC and subnet, so there's no network to build
-#   - cost_saver = true (default) launches every VM as a t3.micro and records the
-#     size that was asked for in the tags. Set TF_VAR_cost_saver=false for real sizes.
+# Real VMs on AWS EC2.
+#   - The stack holds ALL current VM requests in TF_VAR_vm_requests, rows separated by ";":
+#     request_id|environment|vcpu|memory_gb|disk_gb|os_image|owner|hostname|lease_days|requester_email|instance_type
+#     "none" means no VMs. Moveworks adds/removes rows.
+#   - Each VM launches as the instance type the user picked, if it's on allowed_instance_types.
+#   - Uses the account's DEFAULT VPC and subnet, so there's no network to build.
 #
-# Credentials: attach a Spacelift AWS integration (an IAM role) to the stack. No keys.
+# Credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION as stack environment
+# variables (or a Spacelift AWS integration, if your AWS account allows it).
 
 terraform {
   required_version = ">= 1.4"
@@ -32,9 +32,14 @@ variable "region" {
   default = "us-east-2"
 }
 
-variable "cost_saver" {
-  type    = bool
-  default = true
+# Must match the CATALOG in scripts/vm_get_instance_types.py.
+variable "allowed_instance_types" {
+  type = list(string)
+  default = [
+    "t3.micro", "t3.small", "t3.medium", "t3.large",
+    "c7i-flex.large", "m7i-flex.large", "m7i-flex.xlarge", "m7i.2xlarge",
+    "r7i.large", "r7i.xlarge", "m7i.4xlarge",
+  ]
 }
 
 locals {
@@ -50,16 +55,10 @@ locals {
       hostname        = f[7]
       lease_days      = tonumber(f[8])
       requester_email = f[9]
+      instance_type   = coalesce(try(f[10], ""), "t3.micro")
       is_windows      = length(regexall("(?i)windows", f[5])) > 0
       is_rhel         = length(regexall("(?i)rhel|red hat", f[5])) > 0
     }
-  }
-
-  real_types = {
-    "2-8"   = "m7i-flex.large"
-    "4-16"  = "m7i.xlarge"
-    "8-32"  = "m7i.2xlarge"
-    "16-64" = "m7i.4xlarge"
   }
 }
 
@@ -109,12 +108,12 @@ resource "aws_instance" "vm" {
   for_each = local.vms
 
   ami                         = each.value.is_windows ? data.aws_ami.windows.id : (each.value.is_rhel ? data.aws_ami.rhel.id : data.aws_ami.ubuntu.id)
-  instance_type               = var.cost_saver ? "t3.micro" : lookup(local.real_types, "${each.value.vcpu}-${each.value.memory_gb}", "m7i-flex.large")
+  instance_type               = each.value.instance_type
   subnet_id                   = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address = true
 
   root_block_device {
-    volume_size = var.cost_saver ? (each.value.is_windows ? 30 : 8) : each.value.disk_gb
+    volume_size = each.value.is_windows ? max(each.value.disk_gb, 30) : max(each.value.disk_gb, 8)
     volume_type = "gp3"
   }
 
@@ -123,13 +122,19 @@ resource "aws_instance" "vm" {
   }
 
   tags = {
-    Name           = each.value.hostname
-    RequestId      = each.key
-    Environment    = each.value.environment
-    Owner          = each.value.requester_email
-    LeaseDays      = tostring(each.value.lease_days)
-    RequestedSize  = "${each.value.vcpu} vCPU / ${each.value.memory_gb} GB / ${each.value.disk_gb} GB disk"
-    ManagedBy      = "moveworks-spacelift"
+    Name        = each.value.hostname
+    RequestId   = each.key
+    Environment = each.value.environment
+    Owner       = each.value.requester_email
+    LeaseDays   = tostring(each.value.lease_days)
+    ManagedBy   = "moveworks-spacelift"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = contains(var.allowed_instance_types, each.value.instance_type)
+      error_message = "Instance type ${each.value.instance_type} (request ${each.key}) is not in allowed_instance_types."
+    }
   }
 }
 
